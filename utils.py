@@ -1,84 +1,90 @@
 from modeling_gemma import PaliGemmaForConditionalGeneration, PaliGemmaConfig
-from transformers import AutoTokenizer, BitsAndBytesConfig 
+from transformers import AutoTokenizer # BitsAndBytesConfig는 수동 로드로 인해 필요 없으므로 제거
 import torch
 from typing import Tuple
 import os
 import json 
+import glob # safetensors 파일 목록 탐색을 위해 필요
+from safetensors import safe_open # safetensors 파일 읽기를 위해 필요
+
+# NOTE: 이 파일은 Custom Model 클래스의 from_pretrained 속성 부재 문제를 해결하기 위해
+# 가중치를 수동으로 로드(load_state_dict)하는 방식으로 변경되었습니다.
 
 def load_hf_model_mps_optimized(model_path: str, device: str) -> Tuple[PaliGemmaForConditionalGeneration, AutoTokenizer]:
     """
-    PaliGemma 모델을 로드하고, MacBook 환경(CPU/MPS)에서 안정적으로 실행되도록 최적화합니다.
-    
-    1. 8비트 양자화를 시도합니다 (메모리 최적화 시도).
-    2. 8비트 로드 실패 시, BFloat16/Float32로 폴백하여 실행 가능성을 높입니다.
+    PaliGemma 모델을 수동으로 생성하고, safetensors 파일에서 가중치를 로드하여 
+    MacBook 환경(CPU/MPS)에서 안정적으로 실행되도록 최적화합니다.
     """
     print(f"Loading model from {model_path}")
     print(f"Target device: {device}")
     
     # ----------------------------------------------------
-    # 1. Config 로드
+    # 1. Config 로드 (모델 구조 파악)
     # ----------------------------------------------------
     try:
+        # Hugging Face 표준 방식으로 Config 로드
         config = PaliGemmaConfig.from_pretrained(model_path)
     except Exception:
-        # 커스텀 config 클래스가 from_pretrained를 지원하지 않을 경우 수동 로드
+        # 수동 Config 로드 (폴백)
         config_path = os.path.join(model_path, "config.json")
         with open(config_path, "r") as f:
             model_config_file = json.load(f)
             config = PaliGemmaConfig(**model_config_file)
 
-
     # ----------------------------------------------------
-    # 2. 8비트 양자화 시도 (BitsAndBytes 호환성 문제 회피를 위해 HF 로직 활용)
+    # 2. 모델 생성 및 가중치 수동 로드 (AttributeError 해결)
     # ----------------------------------------------------
-    model = None # 초기화
-
+    tensors = {}
     try:
-        print("Attempting 8-bit quantization load...")
+        print("Creating model instance and loading state dict manually...")
         
-        nf8_config = BitsAndBytesConfig(load_in_8bit=True)
+        # 2-1. safetensors 파일 탐색 및 가중치 딕셔너리로 통합
+        safetensors_files = glob.glob(os.path.join(model_path, "*.safetensors"))
         
-        # device_map="auto"와 torch_dtype=bfloat16 설정을 사용하여 MPS 환경에 최적화
-        model = PaliGemmaForConditionalGeneration.from_pretrained(
-            model_path,
-            config=config,
-            quantization_config=nf8_config, # 8비트 설정 전달
-            device_map="auto",              # 자동으로 CPU/MPS에 할당
-            torch_dtype=torch.bfloat16,     # M2/M3에서 가장 효율적인 정밀도
-            trust_remote_code=True,
-        )
-        print("8-bit quantization loading successful (or successfully substituted by HF logic).")
-    
-    except Exception as e:
-        # 8비트 로드 실패 시 (MacBook에서 자주 발생)
-        print(f"Error during 8-bit loading: {e}")
-        print("Falling back to standard BFloat16/Float32 loading...")
-        
-        # ----------------------------------------------------
-        # 3. 폴백: 양자화 없이 BFloat16으로 로드 (MacBook 최적화)
-        # ----------------------------------------------------
-        model = PaliGemmaForConditionalGeneration.from_pretrained(
-            model_path,
-            config=config,
-            device_map="cpu", # 양자화 실패 시 명시적으로 CPU로 로드
-            torch_dtype=torch.bfloat16, # BFloat16으로 메모리 절감 시도
-            trust_remote_code=True,
-        )
-        print("Fallback to BFloat16/CPU loading successful. No quantization applied.")
+        for safetensors_file in safetensors_files:
+            with safe_open(safetensors_file, framework="pt", device="cpu") as f:
+                for key in f.keys():
+                    tensors[key] = f.get_tensor(key)
 
+        # 2-2. 모델 생성 (BFloat16으로 메모리 절약 시도)
+        # MPS/CPU 환경 최적화를 위해 BFloat16으로 dtype 지정
+        model = PaliGemmaForConditionalGeneration(config).to(torch.bfloat16)
+        
+        # 2-3. 가중치 로드
+        model.load_state_dict(tensors, strict=False)
+        print("Model state dict loaded successfully.")
+
+    except Exception as e:
+        print(f"FATAL ERROR during model creation or state dict application: {e}")
+        raise
 
     # ----------------------------------------------------
-    # 4. 토크나이저 로드 및 마무리
+    # 3. 토크나이저 로드 및 마무리
     # ----------------------------------------------------
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_path, padding_side="right")
         
-        # 모델의 최종 디바이스 설정 및 eval 모드
-        # device_map="auto"를 사용했으므로, .to(device)는 모델이 할당된 장치로 이동을 시도합니다.
-        # inference.py의 device 변수가 최종적으로 "mps" 또는 "cpu"를 가리키므로, 해당 장치로 설정합니다.
-        model.to(device).eval() 
+        # 모델을 최종 디바이스로 이동 및 eval 모드 설정
+        # utils.py 파일의 해당 부분을 찾아서 아래처럼 수정하세요.
 
-        print(f"Model loading complete. Final device: {model.device}")
+    # 4. 토크나이저 로드 및 마무리
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(model_path, padding_side="right")
+            
+            # 모델의 최종 디바이스 설정 및 eval 모드
+            model.to(device).eval() 
+
+            # -------------------- [수정된 부분] --------------------
+            # model.device 대신 model.parameters()에서 디바이스 정보를 안전하게 가져옴
+            final_device = next(model.parameters()).device 
+            print(f"Model loading complete. Final device: {final_device}")
+            # -------------------- [END 수정된 부분] --------------------
+            
+        except Exception as e:
+            print(f"Error loading tokenizer or setting device: {e}")
+            raise
+
+        return (model, tokenizer)
         
     except Exception as e:
         print(f"Error loading tokenizer or setting device: {e}")

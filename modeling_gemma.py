@@ -11,10 +11,6 @@ from modeling_siglip import SiglipVisionConfig, SiglipVisionModel
 # -------------------- [END] --------------------
 
 class KVCache():
-    """
-    Key-Value Cache를 관리하는 클래스.
-    이전 토큰의 Key와 Value 상태를 저장하여 추론 속도를 높입니다 (디코딩 최적화).
-    """
     def __init__(self) -> None:
         self.key_cache: List[torch.Tensor] = []
         self.value_cache: List[torch.Tensor] = []
@@ -23,7 +19,6 @@ class KVCache():
         if len(self.key_cache) == 0:
             return 0
         else:
-            # 캐시된 시퀀스 길이 반환 (Shape: [Batch_Size, Num_Heads_KV, Seq_Len, Head_Dim]에서 Seq_Len)
             return self.key_cache[0].shape[-2]
 
     def update(
@@ -32,13 +27,10 @@ class KVCache():
         value_states: torch.Tensor,
         layer_idx: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """현재 레이어의 KV 캐시를 업데이트하고 전체 캐시를 반환합니다."""
         if len(self.key_cache) <= layer_idx:
-            # 캐시가 비어있으면 새로 생성
             self.key_cache.append(key_states)
             self.value_cache.append(value_states)
         else:
-            # 캐시가 있으면 기존 캐시와 새로운 상태를 연결 (Concatenate)
             self.key_cache[layer_idx] = torch.cat([self.key_cache[layer_idx], key_states], dim=-2)
             self.value_cache[layer_idx] = torch.cat([self.value_cache[layer_idx], value_states], dim=-2)
 
@@ -188,24 +180,17 @@ def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
 
 
 class GemmaMLP(nn.Module):
-    """
-    Gemma의 Feed-Forward Network (FFN) 모듈.
-    Gate 활성화 함수를 사용하는 SwiGLU 구조를 채택합니다.
-    """
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
-        
-        # -------------------- [MODIFIED: 4-bit 양자화 적용] --------------------
-        self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
-        # -------------------- [END MODIFIED] --------------------
+        # 8비트/4비트 양자화 제거 후 nn.Linear로 복원
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
 
     def forward(self, x):
-        # FFN 순전파: down_proj(GELU(gate_proj(x)) * up_proj(x))
         return self.down_proj(nn.functional.gelu(self.gate_proj(x), approximate="tanh") * self.up_proj(x))
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -442,19 +427,12 @@ class GemmaForCausalLM(nn.Module):
         return return_data
 
 class PaliGemmaMultiModalProjector(nn.Module):
-    """
-    비전 인코더의 출력 (이미지 특징)을 언어 모델의 임베딩 차원으로 투영하는 모듈.
-    Siglip의 Hidden_Size -> Gemma의 Hidden_Size로 변환합니다.
-    """
     def __init__(self, config: PaliGemmaConfig):
         super().__init__()
-        # -------------------- [MODIFIED: 4-bit 양자화 적용] --------------------
-        # 투영 레이어에 bnb.Linear4bit 적용
+        # 8비트/4비트 양자화 제거 후 nn.Linear로 복원
         self.linear = nn.Linear(config.vision_config.hidden_size, config.vision_config.projection_dim, bias=True)
-        # -------------------- [END MODIFIED] --------------------
 
     def forward(self, image_features):
-        # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Projection_Dim]
         hidden_states = self.linear(image_features)
         return hidden_states
 
