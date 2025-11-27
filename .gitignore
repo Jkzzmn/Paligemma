@@ -34,7 +34,7 @@ __pycache__/
 *.hftoken
 
 # **특정 파일명**이 토큰일 경우 (보안상 확실하게 무시)
-# `#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`와 같이 특정 파일명으로 캐시되는 경우를 위해 임시적으로 추가
+# 와 같이 특정 파일명으로 캐시되는 경우를 위해 임시적으로 추가
 # 보통 Hugging Face는 .cache/huggingface에 저장되므로, 캐시 폴더도 추가합니다.
 .cache/
 
