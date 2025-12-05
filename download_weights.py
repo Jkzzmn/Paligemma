@@ -2,11 +2,10 @@ from huggingface_hub import snapshot_download
 import os
 
 def main():
-    # Create weights directory if it doesn't exist
     weights_dir = os.path.expanduser("~/Document/Project/Paligemma/paligemma-weights")
     os.makedirs(weights_dir, exist_ok=True)
     
-    # Download the model
+    # 모델 다운로드
     model_id = "google/paligemma-3b-pt-224"
     local_dir = os.path.join(weights_dir, "paligemma-3b-pt-224")
     
